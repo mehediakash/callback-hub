@@ -11,8 +11,8 @@ class CallbackController {
     const { member_account, game_uid, game_round, bet_amount, win_amount } =
       callbackData;
 
-    // LOG #1: Incoming callback
-    console.log(`[Callback Received]`, {
+    console.log(`[CallbackHub] ========== PROVIDER CALLBACK ==========`);
+    console.log(`[CallbackHub] Received:`, {
       member: member_account,
       game: game_uid,
       round: game_round,
@@ -22,7 +22,7 @@ class CallbackController {
     });
 
     if (!member_account || !game_round || !game_uid) {
-      console.error("[Callback] Missing required fields");
+      console.error("[CallbackHub] Missing required fields");
       return res.status(200).json({
         credit_amount: -1,
         error: "Missing required fields",
@@ -37,64 +37,66 @@ class CallbackController {
 
       if (!mapping) {
         console.warn(
-          `[Callback] No session: member=${member_account}, game=${game_uid}`,
+          `[CallbackHub] No session: member=${member_account}, game=${game_uid}`,
         );
 
-        // Try to get balance
         const fallbackBalance =
           await CallbackForwardService.getBalanceByMember(member_account);
+        const finalBalance =
+          fallbackBalance !== null && fallbackBalance >= 0
+            ? fallbackBalance
+            : 0;
 
-        // LOG #2: No session found
-        console.log(`[No Session Response]`, {
-          credit_amount: fallbackBalance,
-        });
+        console.log(
+          `[CallbackHub] No session response: credit_amount=${finalBalance}`,
+        );
 
         return res.status(200).json({
-          credit_amount: fallbackBalance >= 0 ? fallbackBalance : 0,
+          credit_amount: finalBalance,
           timestamp: Date.now(),
+          warning: "Session not found",
         });
       }
 
-      // LOG #3: Session found
-      console.log(`[Session Found]`, {
+      console.log(`[CallbackHub] Session found:`, {
         sessionId: mapping.providerSessionId,
         website: mapping.website,
         member: mapping.memberAccount,
         game: mapping.gameUid,
         sessionNumber: mapping.sessionNumber,
+        status: mapping.status,
       });
 
       await mapping.updateActivity();
 
-      // STEP 2: FIXED - Duplicate check with correct parameters
+      // STEP 2: Duplicate check using providerSessionId
       const isDuplicate = await ProcessedRound.isDuplicate(
-        game_round, // FIXED: First param is gameRound
-        mapping.providerSessionId, // FIXED: Second param is providerSessionId
+        game_round,
+        mapping.providerSessionId,
       );
 
-      // LOG #4: Duplicate check result
-      console.log(`[Duplicate Check]`, {
+      console.log(`[CallbackHub] Duplicate check:`, {
         gameRound: game_round,
         providerSessionId: mapping.providerSessionId,
         isDuplicate,
       });
 
       if (isDuplicate) {
-        // FIXED: Get actual balance from website, not fallback
         const currentBalance =
           await CallbackForwardService.getBalanceFromWebsite(
             mapping.callbackUrl,
             member_account,
           );
 
-        // LOG #5: Duplicate response
-        console.log(`[Duplicate Response]`, {
-          credit_amount: currentBalance,
-          round: game_round,
-        });
+        const finalBalance =
+          currentBalance !== null && currentBalance >= 0 ? currentBalance : 0;
+
+        console.log(
+          `[CallbackHub] Duplicate response: credit_amount=${finalBalance}`,
+        );
 
         return res.status(200).json({
-          credit_amount: currentBalance,
+          credit_amount: finalBalance,
           timestamp: Date.now(),
           duplicate: true,
         });
@@ -108,8 +110,7 @@ class CallbackController {
         mapping.providerSessionId,
       );
 
-      // LOG #6: Forward result
-      console.log(`[Forward Result]`, {
+      console.log(`[CallbackHub] Forward result:`, {
         success: forwardResult.success,
         hasResponse: !!forwardResult.response,
         creditAmount: forwardResult.response?.credit_amount,
@@ -117,7 +118,7 @@ class CallbackController {
         duration: forwardResult.duration,
       });
 
-      // STEP 4: Mark as processed ONLY if we have a valid response
+      // STEP 4: Mark as processed if successful
       if (
         forwardResult.success &&
         forwardResult.response &&
@@ -140,57 +141,54 @@ class CallbackController {
 
         const duration = Date.now() - startTime;
 
-        // LOG #7: Success response to provider
-        console.log(`[Provider Response - SUCCESS]`, {
+        console.log(`[CallbackHub] Success - Returning to provider:`, {
           credit_amount: forwardResult.response.credit_amount,
           round: game_round,
           duration_ms: duration,
         });
 
-        // FIXED: Return website's exact response
         return res.status(200).json(forwardResult.response);
       }
 
       // STEP 5: Forward failed - try emergency balance
-      console.error(`[Forward Failed]`, {
+      console.error(`[CallbackHub] Forward failed:`, {
         error: forwardResult.error,
         round: game_round,
       });
 
-      // FIXED: Try to get balance from website directly
       let emergencyBalance = await CallbackForwardService.getBalanceFromWebsite(
         mapping.callbackUrl,
         member_account,
       );
 
-      // LOG #8: Emergency balance
-      console.log(`[Emergency Balance]`, {
-        credit_amount: emergencyBalance,
-        round: game_round,
-      });
+      const finalBalance =
+        emergencyBalance !== null && emergencyBalance >= 0
+          ? emergencyBalance
+          : 0;
+
+      console.log(`[CallbackHub] Emergency balance: ${finalBalance}`);
 
       return res.status(200).json({
-        credit_amount: emergencyBalance,
+        credit_amount: finalBalance,
         timestamp: Date.now(),
         error: forwardResult.error,
       });
     } catch (error) {
-      console.error("[Callback] Fatal error:", error);
+      console.error("[CallbackHub] Fatal error:", error);
+      console.error("[CallbackHub] Error stack:", error.stack);
 
-      // Last resort: try to get balance from any website
       let lastResortBalance = 0;
       try {
-        lastResortBalance =
+        const fallback =
           await CallbackForwardService.getBalanceByMember(member_account);
+        lastResortBalance = fallback !== null && fallback >= 0 ? fallback : 0;
       } catch (e) {
-        console.error("[Last Resort] Failed:", e);
+        console.error("[CallbackHub] Last resort failed:", e);
       }
 
-      // LOG #9: Fatal error response
-      console.log(`[Provider Response - FATAL]`, {
-        credit_amount: lastResortBalance,
-        error: error.message,
-      });
+      console.log(
+        `[CallbackHub] Fatal error response: credit_amount=${lastResortBalance}`,
+      );
 
       return res.status(200).json({
         credit_amount: lastResortBalance,
@@ -211,6 +209,14 @@ class CallbackController {
         gameName,
         callbackUrl,
       } = req.body;
+
+      console.log(`[CallbackHub] Register launch:`, {
+        memberAccount,
+        website,
+        gameUid,
+        providerSessionId,
+        gameName,
+      });
 
       if (!memberAccount || !website || !gameUid || !providerSessionId) {
         return res.status(400).json({ error: "Missing required fields" });
@@ -237,7 +243,7 @@ class CallbackController {
       });
 
       console.log(
-        `[Register] Session #${mapping.sessionNumber}: ${providerSessionId} for ${memberAccount}`,
+        `[CallbackHub] Session registered: #${mapping.sessionNumber} - ${providerSessionId}`,
       );
 
       res.json({
@@ -246,7 +252,7 @@ class CallbackController {
         sessionNumber: mapping.sessionNumber,
       });
     } catch (error) {
-      console.error("[Register] Error:", error);
+      console.error("[CallbackHub] Register error:", error);
       res.status(500).json({ error: error.message });
     }
   }
@@ -265,18 +271,31 @@ class CallbackController {
 
       if (mapping && mapping.status === "active") {
         await mapping.complete();
-        console.log(`[CloseSession] Closed: ${providerSessionId}`);
+        console.log(`[CallbackHub] Session closed: ${providerSessionId}`);
       }
 
       res.json({ success: true });
     } catch (error) {
-      console.error("[CloseSession] Error:", error);
+      console.error("[CallbackHub] Close session error:", error);
       res.status(500).json({ error: error.message });
     }
   }
 
   static async healthCheck(req, res) {
-    res.json({ status: "ok", timestamp: Date.now(), uptime: process.uptime() });
+    const dbState = mongoose.connection.readyState;
+    const dbStatus = {
+      0: "disconnected",
+      1: "connected",
+      2: "connecting",
+      3: "disconnecting",
+    }[dbState];
+
+    res.json({
+      status: "ok",
+      db: dbStatus,
+      timestamp: Date.now(),
+      uptime: process.uptime(),
+    });
   }
 }
 

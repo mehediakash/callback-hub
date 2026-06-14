@@ -12,8 +12,10 @@ class CallbackForwardService {
     const startTime = Date.now();
     const secret = process.env.INTERNAL_SECRET;
 
+    console.log(`[ForwardService] Forwarding to ${website}: ${callbackUrl}`);
+
     if (!callbackUrl || callbackUrl === "undefined") {
-      console.error(`[Forward] Invalid callback URL for ${website}`);
+      console.error(`[ForwardService] Invalid callback URL for ${website}`);
       return {
         success: false,
         error: "Invalid callback URL",
@@ -35,11 +37,20 @@ class CallbackForwardService {
 
       const duration = Date.now() - startTime;
 
+      console.log(`[ForwardService] Response received in ${duration}ms:`, {
+        status: response.status,
+        credit_amount: response.data?.credit_amount,
+        hasTimestamp: !!response.data?.timestamp,
+      });
+
       // Validate response
       const creditAmount = response.data?.credit_amount;
 
       if (creditAmount === undefined || creditAmount === null) {
-        console.error(`[Forward] Missing credit_amount:`, response.data);
+        console.error(
+          `[ForwardService] Missing credit_amount in response:`,
+          response.data,
+        );
         return {
           success: false,
           error: "Missing credit_amount in response",
@@ -48,17 +59,15 @@ class CallbackForwardService {
       }
 
       if (typeof creditAmount !== "number" || isNaN(creditAmount)) {
-        console.error(`[Forward] Invalid credit_amount: ${creditAmount}`);
+        console.error(
+          `[ForwardService] Invalid credit_amount: ${creditAmount}`,
+        );
         return {
           success: false,
           error: "Invalid credit_amount type",
           response: null,
         };
       }
-
-      console.log(
-        `[Forward] Success: balance=${creditAmount}, duration=${duration}ms`,
-      );
 
       return {
         success: true,
@@ -72,7 +81,7 @@ class CallbackForwardService {
       const duration = Date.now() - startTime;
 
       if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") {
-        console.error(`[Forward] Timeout after ${duration}ms`);
+        console.error(`[ForwardService] Timeout after ${duration}ms`);
         return {
           success: false,
           error: `Timeout after ${duration}ms`,
@@ -83,7 +92,7 @@ class CallbackForwardService {
 
       if (error.response) {
         console.error(
-          `[Forward] HTTP ${error.response.status}:`,
+          `[ForwardService] HTTP ${error.response.status}:`,
           error.response.data,
         );
         return {
@@ -93,7 +102,7 @@ class CallbackForwardService {
         };
       }
 
-      console.error(`[Forward] Network error:`, error.message);
+      console.error(`[ForwardService] Network error:`, error.message);
       return {
         success: false,
         error: error.message,
@@ -102,7 +111,6 @@ class CallbackForwardService {
     }
   }
 
-  // FIXED: getBalanceFromWebsite with proper error handling
   static async getBalanceFromWebsite(callbackUrl, memberAccount) {
     try {
       const secret = process.env.INTERNAL_SECRET;
@@ -120,7 +128,6 @@ class CallbackForwardService {
         },
       });
 
-      // FIXED: Handle different response formats
       let balance = null;
 
       if (response.data?.balance !== undefined) {
@@ -129,7 +136,7 @@ class CallbackForwardService {
         balance = response.data.credit_amount;
       } else {
         console.error(`[GetBalance] Unknown response format:`, response.data);
-        return null; // Return null instead of 0 to indicate failure
+        return null;
       }
 
       const numericBalance =
@@ -151,12 +158,10 @@ class CallbackForwardService {
         console.error(`[GetBalance] Response data:`, error.response.data);
       }
 
-      // FIXED: Return null instead of 0 to distinguish error from actual zero balance
       return null;
     }
   }
 
-  // FIXED: getBalanceByMember with null handling
   static async getBalanceByMember(memberAccount) {
     try {
       const mapping = await ProviderLaunchMap.findOne({
@@ -172,12 +177,6 @@ class CallbackForwardService {
         mapping.callbackUrl,
         memberAccount,
       );
-
-      // FIXED: Return 0 only if balance is actually 0, not if error
-      if (balance === null) {
-        return null;
-      }
-
       return balance;
     } catch (error) {
       console.error("[BalanceByMember] Error:", error.message);

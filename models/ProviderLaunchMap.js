@@ -23,7 +23,7 @@ const providerLaunchMapSchema = new mongoose.Schema(
     },
     lastProcessedRound: { type: String, default: null },
     sessionNumber: { type: Number, default: 1 },
-    lastKnownBalance: { type: Number }, // For debugging only
+    lastKnownBalance: { type: Number },
     completedAt: { type: Date },
   },
   { timestamps: true },
@@ -44,7 +44,7 @@ providerLaunchMapSchema.statics.findSessionForCallback = async function (
   const { member_account, game_uid } = callbackData;
 
   console.log(
-    `[FindSession] Looking for member=${member_account}, game=${game_uid}`,
+    `[ProviderLaunchMap] Looking for session: member=${member_account}, game=${game_uid}`,
   );
 
   const session = await this.findOne({
@@ -55,10 +55,10 @@ providerLaunchMapSchema.statics.findSessionForCallback = async function (
 
   if (session) {
     console.log(
-      `[FindSession] Found session #${session.sessionNumber}: ${session.providerSessionId}`,
+      `[ProviderLaunchMap] Found session #${session.sessionNumber}: ${session.providerSessionId}`,
     );
   } else {
-    console.log(`[FindSession] No active session found`);
+    console.log(`[ProviderLaunchMap] No active session found`);
   }
 
   return session;
@@ -73,7 +73,6 @@ providerLaunchMapSchema.statics.createSession = async function ({
   userId,
   gameName,
 }) {
-  // Count existing sessions
   const sessionCount = await this.countDocuments({
     memberAccount: String(memberAccount),
     gameUid: String(gameUid),
@@ -81,7 +80,6 @@ providerLaunchMapSchema.statics.createSession = async function ({
 
   const sessionNumber = sessionCount + 1;
 
-  // Close any active sessions for this user+game
   const closedCount = await this.updateMany(
     {
       memberAccount: String(memberAccount),
@@ -96,11 +94,10 @@ providerLaunchMapSchema.statics.createSession = async function ({
 
   if (closedCount.modifiedCount > 0) {
     console.log(
-      `[CreateSession] Closed ${closedCount.modifiedCount} previous sessions`,
+      `[ProviderLaunchMap] Closed ${closedCount.modifiedCount} previous sessions`,
     );
   }
 
-  // Create new session
   const session = await this.create({
     memberAccount: String(memberAccount),
     gameUid: String(gameUid),
@@ -116,7 +113,7 @@ providerLaunchMapSchema.statics.createSession = async function ({
   });
 
   console.log(
-    `[CreateSession] Created session #${sessionNumber}: ${providerSessionId}`,
+    `[ProviderLaunchMap] Created session #${sessionNumber}: ${providerSessionId}`,
   );
 
   return session;
