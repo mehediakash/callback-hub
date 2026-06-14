@@ -1,4 +1,3 @@
-const mongoose = require("mongoose");
 // callback-hub/controllers/CallbackController.js
 const ProviderLaunchMap = require("../models/ProviderLaunchMap");
 const ProcessedRound = require("../models/ProcessedRound");
@@ -6,10 +5,11 @@ const CallbackForwardService = require("../services/CallbackForwardService");
 
 class CallbackController {
   /**
-   * Handle incoming callback from provider (SoftAPI/JILI)
+   * Handle incoming callback from provider
    *
-   * Since provider doesn't send session_id, we use:
-   * member_account + game_uid to find the active session
+   * CRITICAL FIX: NEVER modify the website's response.
+   * The website's handleGameCallback() returns the correct balance.
+   * Forward it EXACTLY as received.
    */
   static async handleProviderCallback(req, res) {
     const startTime = Date.now();
@@ -22,47 +22,42 @@ class CallbackController {
       `[Callback] Received: round=${game_round}, member=${member_account}, game=${game_uid}`,
     );
 
-    try {
-      // VALIDATION: Ensure required fields exist
-      if (!member_account || !game_round || !game_uid) {
-        console.error("[Callback] Missing required fields:", {
-          member_account,
-          game_round,
-          game_uid,
-        });
-        return res.status(200).json({
-          credit_amount: -1,
-          error: "Missing required fields",
-          timestamp: Date.now(),
-        });
-      }
+    // Early validation
+    if (!member_account || !game_round || !game_uid) {
+      console.error("[Callback] Missing required fields");
+      return res.status(200).json({
+        credit_amount: -1,
+        error: "Missing required fields",
+        timestamp: Date.now(),
+      });
+    }
 
-      // STEP 1: Find the active session for this user + game
+    try {
+      // STEP 1: Find active session
       const mapping =
         await ProviderLaunchMap.findSessionForCallback(callbackData);
 
       if (!mapping) {
         console.warn(
-          `[Callback] No active session found: member=${member_account}, game=${game_uid}, round=${game_round}`,
+          `[Callback] No active session: member=${member_account}, game=${game_uid}`,
         );
 
-        // Try to get current balance by looking up user across websites
+        // Get balance from any means possible
         const fallbackBalance =
           await CallbackForwardService.getBalanceByMember(member_account);
 
-        // Return 200 with current balance (provider can still function)
+        // Return fallback balance (not ideal but better than 0)
         return res.status(200).json({
-          credit_amount: fallbackBalance,
+          credit_amount: fallbackBalance >= 0 ? fallbackBalance : 0,
           timestamp: Date.now(),
-          warning: "Session not found, using fallback balance",
+          warning: "Session not found",
         });
       }
 
-      // Update last activity timestamp
+      // Update activity
       await mapping.updateActivity();
 
-      // STEP 2: Duplicate callback prevention
-      // Using member_account + game_uid + game_round as unique key
+      // STEP 2: Duplicate prevention
       const isDuplicate = await ProcessedRound.isDuplicate(
         member_account,
         game_uid,
@@ -70,11 +65,9 @@ class CallbackController {
       );
 
       if (isDuplicate) {
-        console.log(
-          `[Callback] Duplicate prevented: round=${game_round}, member=${member_account}, game=${game_uid}`,
-        );
+        console.log(`[Callback] Duplicate prevented: round=${game_round}`);
 
-        // Get current balance for duplicate response
+        // CRITICAL FIX: Get ACTUAL balance from website for duplicate
         const currentBalance =
           await CallbackForwardService.getBalanceFromWebsite(
             mapping.callbackUrl,
@@ -88,16 +81,16 @@ class CallbackController {
         });
       }
 
-      // STEP 3: Forward to website with timeout management
+      // STEP 3: Forward to website - THIS MUST RETURN WEBSITE'S EXACT RESPONSE
       const forwardResult = await CallbackForwardService.forwardToWebsite(
         mapping.callbackUrl,
         callbackData,
         mapping.website,
-        mapping.providerSessionId, // Pass for debugging, but not used for lookup
+        mapping.providerSessionId,
       );
 
-      // STEP 4: Mark round as processed (only if website succeeded)
-      if (forwardResult.success) {
+      // STEP 4: Mark as processed ONLY if website succeeded
+      if (forwardResult.success && forwardResult.response) {
         await ProcessedRound.markProcessed({
           memberAccount: member_account,
           gameUid: game_uid,
@@ -110,51 +103,58 @@ class CallbackController {
           winAmount: win_amount || 0,
         });
 
-        // Update last processed round in mapping
         mapping.lastProcessedRound = game_round;
         await mapping.save();
-      } else {
-        // Website failed - mark as failed but don't block
-        await ProcessedRound.markFailed({
-          memberAccount: member_account,
-          gameUid: game_uid,
-          gameRound: game_round,
-          errorMessage: forwardResult.error,
-        });
 
-        console.error(
-          `[Callback] Forward failed for round=${game_round}:`,
-          forwardResult.error,
+        const duration = Date.now() - startTime;
+        console.log(
+          `[Callback] Success in ${duration}ms: round=${game_round}, balance=${forwardResult.response?.credit_amount}`,
         );
+
+        // CRITICAL FIX: Return WEBSITE'S EXACT RESPONSE, not modified
+        return res.status(200).json(forwardResult.response);
       }
 
-      const duration = Date.now() - startTime;
-      console.log(
-        `[Callback] Processed in ${duration}ms: round=${game_round}, success=${forwardResult.success}`,
+      // STEP 5: Website failed - but we still need to respond to provider
+      console.error(
+        `[Callback] Website failed for round=${game_round}:`,
+        forwardResult.error,
       );
 
-      // Always return 200 to provider
-      return res.status(200).json(
-        forwardResult.response || {
-          credit_amount: forwardResult.balance || 0,
-          timestamp: Date.now(),
-        },
-      );
+      // CRITICAL FIX: Try to get current balance one more time
+      const emergencyBalance =
+        await CallbackForwardService.getBalanceFromWebsite(
+          mapping.callbackUrl,
+          member_account,
+        );
+
+      return res.status(200).json({
+        credit_amount: emergencyBalance >= 0 ? emergencyBalance : 0,
+        timestamp: Date.now(),
+        error: forwardResult.error,
+      });
     } catch (error) {
       console.error("[Callback] Fatal error:", error);
 
-      // CRITICAL: Always return 200 to provider on fatal errors
+      // Last resort: try to get balance directly from database
+      let emergencyBalance = 0;
+      try {
+        emergencyBalance =
+          await CallbackForwardService.getBalanceByMember(member_account);
+      } catch (e) {
+        console.error("[Callback] Emergency balance failed:", e);
+      }
+
       return res.status(200).json({
-        credit_amount: -1,
-        error: "Internal processing error",
+        credit_amount: emergencyBalance,
         timestamp: Date.now(),
+        error: "Internal error",
       });
     }
   }
 
   /**
    * Register a new game launch session
-   * Called by website backend before redirecting player to game
    */
   static async registerLaunch(req, res) {
     try {
@@ -168,15 +168,13 @@ class CallbackController {
         callbackUrl,
       } = req.body;
 
-      // Validation
       if (!memberAccount || !website || !gameUid || !providerSessionId) {
         return res.status(400).json({
-          error:
-            "Missing required fields: memberAccount, website, gameUid, providerSessionId",
+          error: "Missing required fields",
         });
       }
 
-      // Get callback URL from config if not provided
+      // Get callback URL
       let finalCallbackUrl = callbackUrl;
       if (!finalCallbackUrl) {
         const websiteCallbackUrls = {
@@ -187,7 +185,7 @@ class CallbackController {
         finalCallbackUrl = websiteCallbackUrls[website];
       }
 
-      // Create new session (this automatically closes previous active sessions for this user+game)
+      // Create session (closes previous active ones)
       const mapping = await ProviderLaunchMap.createSession({
         memberAccount: String(memberAccount),
         gameUid: String(gameUid),
@@ -199,7 +197,7 @@ class CallbackController {
       });
 
       console.log(
-        `[Register] New session #${mapping.sessionNumber}: website=${website}, member=${memberAccount}, game=${gameUid}, session=${providerSessionId}`,
+        `[Register] Session #${mapping.sessionNumber}: ${providerSessionId}`,
       );
 
       res.json({
@@ -214,7 +212,7 @@ class CallbackController {
   }
 
   /**
-   * Close a game session (called when game ends normally)
+   * Close session
    */
   static async closeSession(req, res) {
     try {
@@ -230,7 +228,7 @@ class CallbackController {
 
       if (mapping && mapping.status === "active") {
         await mapping.complete();
-        console.log(`[CloseSession] Completed session: ${providerSessionId}`);
+        console.log(`[CloseSession] Closed: ${providerSessionId}`);
       }
 
       res.json({ success: true });
@@ -240,78 +238,12 @@ class CallbackController {
     }
   }
 
-  /**
-   * Health check endpoint
-   */
   static async healthCheck(req, res) {
-    const dbState = mongoose.connection.readyState;
-    const dbStatus = {
-      0: "disconnected",
-      1: "connected",
-      2: "connecting",
-      3: "disconnecting",
-    }[dbState];
-
     res.json({
       status: "ok",
-      db: dbStatus,
       timestamp: Date.now(),
       uptime: process.uptime(),
     });
-  }
-
-  /**
-   * Get session info (debugging)
-   */
-  static async getSession(req, res) {
-    try {
-      const { memberAccount, gameUid, providerSessionId } = req.query;
-
-      let query = {};
-      if (providerSessionId) {
-        query = { providerSessionId: String(providerSessionId) };
-      } else if (memberAccount && gameUid) {
-        query = {
-          memberAccount: String(memberAccount),
-          gameUid: String(gameUid),
-        };
-      } else if (memberAccount) {
-        query = { memberAccount: String(memberAccount) };
-      } else {
-        return res.status(400).json({
-          error: "Provide memberAccount, gameUid, or providerSessionId",
-        });
-      }
-
-      const mappings = await ProviderLaunchMap.find(query)
-        .sort({ launchedAt: -1 })
-        .limit(10);
-
-      res.json({ mappings, count: mappings.length });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  }
-
-  /**
-   * Get processed rounds (debugging)
-   */
-  static async getProcessedRounds(req, res) {
-    try {
-      const { memberAccount, gameUid, limit = 50 } = req.query;
-
-      let query = {};
-      if (memberAccount) query.memberAccount = String(memberAccount);
-      if (gameUid) query.gameUid = String(gameUid);
-
-      const rounds = await ProcessedRound.find(query)
-        .sort({ processedAt: -1 })
-        .limit(parseInt(limit));
-
-      res.json({ rounds, count: rounds.length });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
   }
 }
 

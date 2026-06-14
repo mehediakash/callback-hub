@@ -1,114 +1,40 @@
 // callback-hub/models/ProcessedRound.js
 const mongoose = require("mongoose");
 
-/**
- * ProcessedRound - Prevents duplicate callback processing
- *
- * Since provider doesn't send session_id, we use:
- * (member_account + game_uid + game_round) as unique key
- *
- * This ensures we never process the same round twice
- * even if user has multiple sessions of same game.
- */
 const processedRoundSchema = new mongoose.Schema(
   {
-    // UNIQUE COMPOUND KEY: All fields provider sends + what we need
-    memberAccount: {
-      type: String,
-      required: true,
-    },
-
-    gameUid: {
-      type: String,
-      required: true,
-    },
-
-    gameRound: {
-      type: String,
-      required: true,
-    },
-
-    // Reference to the launch mapping
+    memberAccount: { type: String, required: true },
+    gameUid: { type: String, required: true },
+    gameRound: { type: String, required: true },
     mappingId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "ProviderLaunchMap",
       required: true,
     },
-
-    // Website that processed this callback
-    website: {
-      type: String,
-      required: true,
-    },
-
-    // Provider session ID (for debugging)
-    providerSessionId: {
-      type: String,
-      required: false,
-    },
-
-    // Callback data snapshot
-    callbackData: {
-      type: mongoose.Schema.Types.Mixed,
-      required: false,
-    },
-
-    // Processing metadata
-    betAmount: {
-      type: Number,
-      default: 0,
-    },
-
-    winAmount: {
-      type: Number,
-      default: 0,
-    },
-
-    processedAt: {
-      type: Date,
-      default: Date.now,
-    },
-
-    // Retry tracking
-    retryCount: {
-      type: Number,
-      default: 0,
-    },
-
-    // If processing failed
-    failed: {
-      type: Boolean,
-      default: false,
-    },
-
-    errorMessage: {
-      type: String,
-      required: false,
-    },
+    website: { type: String, required: true },
+    providerSessionId: { type: String },
+    callbackData: { type: mongoose.Schema.Types.Mixed },
+    betAmount: { type: Number, default: 0 },
+    winAmount: { type: Number, default: 0 },
+    processedAt: { type: Date, default: Date.now },
+    retryCount: { type: Number, default: 0 },
+    failed: { type: Boolean, default: false },
+    errorMessage: { type: String },
   },
-  {
-    timestamps: true,
-  },
+  { timestamps: true },
 );
 
-// UNIQUE INDEX - This prevents duplicate processing
-// A specific round for a specific user+game can only be processed once
+// UNIQUE INDEX - Prevents duplicates
 processedRoundSchema.index(
   { memberAccount: 1, gameUid: 1, gameRound: 1 },
   { unique: true },
 );
 
-// Indexes for query performance
+// Additional indexes
 processedRoundSchema.index({ mappingId: 1, processedAt: -1 });
 processedRoundSchema.index({ memberAccount: 1, processedAt: -1 });
-processedRoundSchema.index({ website: 1, processedAt: -1 });
-
-// TTL index - Delete after 7 days (long enough for debugging)
 processedRoundSchema.index({ processedAt: 1 }, { expireAfterSeconds: 604800 });
 
-/**
- * Check if a round has already been processed
- */
 processedRoundSchema.statics.isDuplicate = async function (
   memberAccount,
   gameUid,
@@ -124,12 +50,13 @@ processedRoundSchema.statics.isDuplicate = async function (
     gameRound: String(gameRound),
   });
 
+  if (exists) {
+    console.log(`[DuplicateCheck] Round ${gameRound} already processed`);
+  }
+
   return !!exists;
 };
 
-/**
- * Mark a round as processed
- */
 processedRoundSchema.statics.markProcessed = async function ({
   memberAccount,
   gameUid,
@@ -154,37 +81,18 @@ processedRoundSchema.statics.markProcessed = async function ({
       winAmount: winAmount || 0,
       processedAt: new Date(),
     });
+
+    console.log(`[MarkProcessed] Round ${gameRound} marked as processed`);
     return true;
   } catch (error) {
-    // Duplicate key error (E11000) means already processed
     if (error.code === 11000) {
+      console.log(
+        `[MarkProcessed] Round ${gameRound} already exists (duplicate)`,
+      );
       return false;
     }
     throw error;
   }
-};
-
-/**
- * Mark a round as failed (for retry logic)
- */
-processedRoundSchema.statics.markFailed = async function ({
-  memberAccount,
-  gameUid,
-  gameRound,
-  errorMessage,
-}) {
-  await this.updateOne(
-    {
-      memberAccount: String(memberAccount),
-      gameUid: String(gameUid),
-      gameRound: String(gameRound),
-    },
-    {
-      $set: { failed: true, errorMessage },
-      $inc: { retryCount: 1 },
-    },
-    { upsert: true },
-  );
 };
 
 module.exports =
