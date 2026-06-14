@@ -3,15 +3,6 @@ const axios = require("axios");
 const ProviderLaunchMap = require("../models/ProviderLaunchMap");
 
 class CallbackForwardService {
-  /**
-   * Forward callback to website
-   *
-   * CRITICAL FIX:
-   * 1. MUST return website's EXACT response
-   * 2. Timeout increased to 5 seconds (some games need more time)
-   * 3. NEVER use fallback balance unless website actually fails
-   * 4. Preserve the website's credit_amount exactly
-   */
   static async forwardToWebsite(
     callbackUrl,
     callbackData,
@@ -31,9 +22,8 @@ class CallbackForwardService {
     }
 
     try {
-      // Increased timeout to 5 seconds (some game providers are slow)
       const response = await axios.post(callbackUrl, callbackData, {
-        timeout: 5000, // 5 seconds - matches provider expectations
+        timeout: 5000,
         headers: {
           "Content-Type": "application/json",
           "X-Callback-Secret": secret,
@@ -45,26 +35,31 @@ class CallbackForwardService {
 
       const duration = Date.now() - startTime;
 
-      // CRITICAL: Validate website response has credit_amount
+      // Validate response
       const creditAmount = response.data?.credit_amount;
 
       if (creditAmount === undefined || creditAmount === null) {
-        console.error(
-          `[Forward] Website returned no credit_amount:`,
-          response.data,
-        );
+        console.error(`[Forward] Missing credit_amount:`, response.data);
         return {
           success: false,
-          error: "Website response missing credit_amount",
+          error: "Missing credit_amount in response",
+          response: null,
+        };
+      }
+
+      if (typeof creditAmount !== "number" || isNaN(creditAmount)) {
+        console.error(`[Forward] Invalid credit_amount: ${creditAmount}`);
+        return {
+          success: false,
+          error: "Invalid credit_amount type",
           response: null,
         };
       }
 
       console.log(
-        `[Forward] Success in ${duration}ms: credit_amount=${creditAmount}, round=${callbackData.game_round}`,
+        `[Forward] Success: balance=${creditAmount}, duration=${duration}ms`,
       );
 
-      // CRITICAL FIX: Return EXACT website response, don't modify
       return {
         success: true,
         response: {
@@ -76,14 +71,8 @@ class CallbackForwardService {
     } catch (error) {
       const duration = Date.now() - startTime;
 
-      // Timeout error
       if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") {
-        console.error(
-          `[Forward] TIMEOUT (${duration}ms) for ${website}: round=${callbackData.game_round}`,
-        );
-
-        // CRITICAL FIX: Don't return fallback balance here
-        // Return failure so controller can try emergency balance
+        console.error(`[Forward] Timeout after ${duration}ms`);
         return {
           success: false,
           error: `Timeout after ${duration}ms`,
@@ -92,24 +81,19 @@ class CallbackForwardService {
         };
       }
 
-      // Website responded with error status
       if (error.response) {
         console.error(
-          `[Forward] HTTP ${error.response.status} from ${website}:`,
+          `[Forward] HTTP ${error.response.status}:`,
           error.response.data,
         );
-
         return {
           success: false,
           error: `HTTP ${error.response.status}`,
           response: null,
-          status: error.response.status,
         };
       }
 
-      // Network errors
       console.error(`[Forward] Network error:`, error.message);
-
       return {
         success: false,
         error: error.message,
@@ -118,95 +102,86 @@ class CallbackForwardService {
     }
   }
 
-  /**
-   * Get balance directly from website API
-   * This is used for:
-   * 1. Duplicate callbacks
-   * 2. Emergency fallback when main callback fails
-   */
+  // FIXED: getBalanceFromWebsite with proper error handling
   static async getBalanceFromWebsite(callbackUrl, memberAccount) {
     try {
       const secret = process.env.INTERNAL_SECRET;
-
-      // Extract base URL from callback URL
       const baseUrl = callbackUrl.replace("/internal/provider-callback", "");
+
+      console.log(
+        `[GetBalance] Requesting from ${baseUrl}/internal/balance for ${memberAccount}`,
+      );
 
       const response = await axios.get(`${baseUrl}/internal/balance`, {
         params: { memberAccount: String(memberAccount) },
-        timeout: 3000, // 3 seconds for balance check
+        timeout: 3000,
         headers: {
           "X-Callback-Secret": secret,
         },
       });
 
-      const balance =
-        response.data?.balance ?? response.data?.credit_amount ?? null;
+      // FIXED: Handle different response formats
+      let balance = null;
 
-      if (balance === null) {
-        console.error(
-          `[BalanceFromWebsite] No balance in response:`,
-          response.data,
-        );
-        return 0;
+      if (response.data?.balance !== undefined) {
+        balance = response.data.balance;
+      } else if (response.data?.credit_amount !== undefined) {
+        balance = response.data.credit_amount;
+      } else {
+        console.error(`[GetBalance] Unknown response format:`, response.data);
+        return null; // Return null instead of 0 to indicate failure
       }
 
       const numericBalance =
         typeof balance === "number" ? balance : parseFloat(balance);
 
-      console.log(
-        `[BalanceFromWebsite] Got balance ${numericBalance} for ${memberAccount}`,
-      );
+      if (isNaN(numericBalance)) {
+        console.error(`[GetBalance] NaN balance: ${balance}`);
+        return null;
+      }
 
-      return isNaN(numericBalance) ? 0 : numericBalance;
-    } catch (error) {
-      console.error(
-        `[BalanceFromWebsite] Error for ${memberAccount}:`,
-        error.message,
+      console.log(
+        `[GetBalance] Success: balance=${numericBalance} for ${memberAccount}`,
       );
-      return 0;
+      return numericBalance;
+    } catch (error) {
+      console.error(`[GetBalance] Error for ${memberAccount}:`, error.message);
+
+      if (error.response) {
+        console.error(`[GetBalance] Response data:`, error.response.data);
+      }
+
+      // FIXED: Return null instead of 0 to distinguish error from actual zero balance
+      return null;
     }
   }
 
-  /**
-   * Get balance by member account (searches across websites)
-   */
+  // FIXED: getBalanceByMember with null handling
   static async getBalanceByMember(memberAccount) {
     try {
-      // Find most recent session for this member
       const mapping = await ProviderLaunchMap.findOne({
         memberAccount: String(memberAccount),
       }).sort({ launchedAt: -1 });
 
       if (!mapping) {
         console.log(`[BalanceByMember] No mapping for ${memberAccount}`);
-        return 0;
+        return null;
       }
 
-      return await this.getBalanceFromWebsite(
+      const balance = await this.getBalanceFromWebsite(
         mapping.callbackUrl,
         memberAccount,
       );
+
+      // FIXED: Return 0 only if balance is actually 0, not if error
+      if (balance === null) {
+        return null;
+      }
+
+      return balance;
     } catch (error) {
       console.error("[BalanceByMember] Error:", error.message);
-      return 0;
-    }
-  }
-
-  /**
-   * Update session balance (called by website on successful callback)
-   * This is OPTIONAL - used for debugging only
-   */
-  static async updateSessionBalance(providerSessionId, balance) {
-    try {
-      await ProviderLaunchMap.updateOne(
-        { providerSessionId: String(providerSessionId) },
-        {
-          lastKnownBalance: balance,
-          lastActivityAt: new Date(),
-        },
-      );
-    } catch (error) {
-      // Non-critical
+      return null;
     }
   }
 }
