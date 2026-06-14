@@ -31,13 +31,56 @@ class CallbackController {
     }
 
     try {
-      // STEP 1: Find session
-      const mapping =
-        await ProviderLaunchMap.findSessionForCallback(callbackData);
+      // STEP 1: Find session - THIS IS THE CRITICAL PART
+      // Try to find ANY active session for this user+game
+      let mapping = await ProviderLaunchMap.findOne({
+        memberAccount: String(member_account),
+        gameUid: String(game_uid),
+        status: "active",
+      }).sort({ launchedAt: -1 }); // Get most recent
+
+      // If no active session, try to find ANY session from last 10 minutes
+      if (!mapping) {
+        console.log(
+          `[CallbackHub] No active session, looking for recent session...`,
+        );
+
+        mapping = await ProviderLaunchMap.findOne({
+          memberAccount: String(member_account),
+          gameUid: String(game_uid),
+          launchedAt: { $gt: new Date(Date.now() - 10 * 60 * 1000) },
+        }).sort({ launchedAt: -1 });
+
+        if (mapping) {
+          console.log(
+            `[CallbackHub] Found recent session with status=${mapping.status}, reactivating...`,
+          );
+          mapping.status = "active";
+          mapping.lastActivityAt = new Date();
+          await mapping.save();
+        }
+      }
 
       if (!mapping) {
-        console.warn(
-          `[CallbackHub] No session: member=${member_account}, game=${game_uid}`,
+        console.error(
+          `[CallbackHub] NO SESSION FOUND for member=${member_account}, game=${game_uid}`,
+        );
+
+        // Log all sessions for debugging
+        const allSessions = await ProviderLaunchMap.find({
+          memberAccount: String(member_account),
+        })
+          .sort({ launchedAt: -1 })
+          .limit(10);
+
+        console.error(
+          `[CallbackHub] Recent sessions for user:`,
+          allSessions.map((s) => ({
+            sessionId: s.providerSessionId,
+            gameUid: s.gameUid,
+            status: s.status,
+            launchedAt: s.launchedAt,
+          })),
         );
 
         const fallbackBalance =
@@ -58,18 +101,19 @@ class CallbackController {
         });
       }
 
-      console.log(`[CallbackHub] Session found:`, {
+      console.log(`[CallbackHub] Using session:`, {
         sessionId: mapping.providerSessionId,
         website: mapping.website,
         member: mapping.memberAccount,
         game: mapping.gameUid,
         sessionNumber: mapping.sessionNumber,
         status: mapping.status,
+        launchedAt: mapping.launchedAt,
       });
 
       await mapping.updateActivity();
 
-      // STEP 2: Duplicate check using providerSessionId
+      // STEP 2: Duplicate check
       const isDuplicate = await ProcessedRound.isDuplicate(
         game_round,
         mapping.providerSessionId,
@@ -141,7 +185,7 @@ class CallbackController {
 
         const duration = Date.now() - startTime;
 
-        console.log(`[CallbackHub] Success - Returning to provider:`, {
+        console.log(`[CallbackHub] SUCCESS - Returning to provider:`, {
           credit_amount: forwardResult.response.credit_amount,
           round: game_round,
           duration_ms: duration,
@@ -232,7 +276,15 @@ class CallbackController {
         finalCallbackUrl = websiteCallbackUrls[website];
       }
 
-      const mapping = await ProviderLaunchMap.createSession({
+      // FIXED: Don't close previous sessions - just create new one
+      const sessionCount = await ProviderLaunchMap.countDocuments({
+        memberAccount: String(memberAccount),
+        gameUid: String(gameUid),
+      });
+
+      const sessionNumber = sessionCount + 1;
+
+      const mapping = await ProviderLaunchMap.create({
         memberAccount: String(memberAccount),
         gameUid: String(gameUid),
         website,
@@ -240,10 +292,17 @@ class CallbackController {
         providerSessionId: String(providerSessionId),
         userId: userId || null,
         gameName: gameName || null,
+        sessionNumber,
+        status: "active",
+        launchedAt: new Date(),
+        lastActivityAt: new Date(),
       });
 
       console.log(
         `[CallbackHub] Session registered: #${mapping.sessionNumber} - ${providerSessionId}`,
+      );
+      console.log(
+        `[CallbackHub] User ${memberAccount} now has ${await ProviderLaunchMap.countDocuments({ memberAccount: String(memberAccount), status: "active" })} active sessions`,
       );
 
       res.json({
@@ -270,7 +329,9 @@ class CallbackController {
       });
 
       if (mapping && mapping.status === "active") {
-        await mapping.complete();
+        mapping.status = "completed";
+        mapping.completedAt = new Date();
+        await mapping.save();
         console.log(`[CallbackHub] Session closed: ${providerSessionId}`);
       }
 
@@ -282,6 +343,7 @@ class CallbackController {
   }
 
   static async healthCheck(req, res) {
+    const mongoose = require("mongoose");
     const dbState = mongoose.connection.readyState;
     const dbStatus = {
       0: "disconnected",

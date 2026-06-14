@@ -31,13 +31,11 @@ const providerLaunchMapSchema = new mongoose.Schema(
 
 // Indexes
 providerLaunchMapSchema.index({ memberAccount: 1, gameUid: 1, status: 1 });
-providerLaunchMapSchema.index({
-  memberAccount: 1,
-  gameUid: 1,
-  sessionNumber: -1,
-});
+providerLaunchMapSchema.index({ memberAccount: 1, status: 1 });
+providerLaunchMapSchema.index({ providerSessionId: 1, status: 1 });
 providerLaunchMapSchema.index({ createdAt: 1 }, { expireAfterSeconds: 7200 });
 
+// FIXED: Find session - try multiple strategies
 providerLaunchMapSchema.statics.findSessionForCallback = async function (
   callbackData,
 ) {
@@ -47,23 +45,43 @@ providerLaunchMapSchema.statics.findSessionForCallback = async function (
     `[ProviderLaunchMap] Looking for session: member=${member_account}, game=${game_uid}`,
   );
 
+  // Strategy 1: Find the MOST RECENT active session (not oldest)
   const session = await this.findOne({
     memberAccount: String(member_account),
     gameUid: String(game_uid),
     status: "active",
-  }).sort({ sessionNumber: -1, launchedAt: -1 });
+  }).sort({ launchedAt: -1 }); // ← Get newest session first
 
   if (session) {
     console.log(
-      `[ProviderLaunchMap] Found session #${session.sessionNumber}: ${session.providerSessionId}`,
+      `[ProviderLaunchMap] Found active session #${session.sessionNumber}: ${session.providerSessionId}`,
     );
-  } else {
-    console.log(`[ProviderLaunchMap] No active session found`);
+    return session;
   }
 
-  return session;
+  // Strategy 2: If no active session, find any session from last 5 minutes
+  const recentSession = await this.findOne({
+    memberAccount: String(member_account),
+    gameUid: String(game_uid),
+    launchedAt: { $gt: new Date(Date.now() - 5 * 60 * 1000) }, // Last 5 minutes
+  }).sort({ launchedAt: -1 });
+
+  if (recentSession) {
+    console.log(
+      `[ProviderLaunchMap] Found recent session (status=${recentSession.status}): ${recentSession.providerSessionId}`,
+    );
+    // Reactivate it
+    recentSession.status = "active";
+    recentSession.lastActivityAt = new Date();
+    await recentSession.save();
+    return recentSession;
+  }
+
+  console.log(`[ProviderLaunchMap] No session found`);
+  return null;
 };
 
+// FIXED: Create session WITHOUT closing previous ones
 providerLaunchMapSchema.statics.createSession = async function ({
   memberAccount,
   gameUid,
@@ -73,6 +91,7 @@ providerLaunchMapSchema.statics.createSession = async function ({
   userId,
   gameName,
 }) {
+  // Count existing sessions
   const sessionCount = await this.countDocuments({
     memberAccount: String(memberAccount),
     gameUid: String(gameUid),
@@ -80,23 +99,9 @@ providerLaunchMapSchema.statics.createSession = async function ({
 
   const sessionNumber = sessionCount + 1;
 
-  const closedCount = await this.updateMany(
-    {
-      memberAccount: String(memberAccount),
-      gameUid: String(gameUid),
-      status: "active",
-    },
-    {
-      status: "completed",
-      completedAt: new Date(),
-    },
-  );
-
-  if (closedCount.modifiedCount > 0) {
-    console.log(
-      `[ProviderLaunchMap] Closed ${closedCount.modifiedCount} previous sessions`,
-    );
-  }
+  // IMPORTANT FIX: DO NOT close previous sessions
+  // Let them expire naturally via TTL
+  // Just create the new session as active
 
   const session = await this.create({
     memberAccount: String(memberAccount),
@@ -113,7 +118,18 @@ providerLaunchMapSchema.statics.createSession = async function ({
   });
 
   console.log(
-    `[ProviderLaunchMap] Created session #${sessionNumber}: ${providerSessionId}`,
+    `[ProviderLaunchMap] Created session #${sessionNumber}: ${providerSessionId} (keeping previous sessions active)`,
+  );
+
+  // Log all active sessions for this user
+  const activeCount = await this.countDocuments({
+    memberAccount: String(memberAccount),
+    gameUid: String(gameUid),
+    status: "active",
+  });
+
+  console.log(
+    `[ProviderLaunchMap] User ${memberAccount} now has ${activeCount} active sessions for game ${gameUid}`,
   );
 
   return session;
