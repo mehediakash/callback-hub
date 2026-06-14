@@ -12,7 +12,7 @@ router.post("/internal/close-session", CallbackController.closeSession);
 
 // Health and debugging endpoints
 router.get("/health", CallbackController.healthCheck);
-router.get("/debug/session", CallbackController.getSession);
-router.get("/debug/rounds", CallbackController.getProcessedRounds);
+// router.get("/debug/session", CallbackController.getSession);
+// router.get("/debug/rounds", CallbackController.getProcessedRounds);
 
 module.exports = router;
