@@ -123,7 +123,11 @@ class CallbackForwardService {
     }
   }
 
-  static async getBalanceFromWebsite(callbackUrl, memberAccount) {
+  static async getBalanceFromWebsite(
+    callbackUrl,
+    memberAccount,
+    userId = null,
+  ) {
     try {
       const secret = process.env.INTERNAL_SECRET;
       const baseUrl = callbackUrl.replace("/internal/provider-callback", "");
@@ -133,7 +137,10 @@ class CallbackForwardService {
       );
 
       const response = await axios.get(`${baseUrl}/internal/balance`, {
-        params: { memberAccount: String(memberAccount) },
+        params: {
+          memberAccount: String(memberAccount),
+          ...(userId ? { userId: String(userId) } : {}),
+        },
         timeout: 3000,
         headers: {
           "X-Callback-Secret": secret,
@@ -174,11 +181,15 @@ class CallbackForwardService {
     }
   }
 
-  static async getBalanceByMember(memberAccount, website = null) {
+  static async getBalanceByMember(
+    memberAccount,
+    website = null,
+    userId = null,
+  ) {
     try {
-      const query = {
-        memberAccount: String(memberAccount),
-      };
+      const query = userId
+        ? { userId: String(userId) }
+        : { memberAccount: String(memberAccount) };
 
       if (website) {
         query.website = String(website);
@@ -196,6 +207,7 @@ class CallbackForwardService {
       const balance = await this.getBalanceFromWebsite(
         mapping.callbackUrl,
         memberAccount,
+        mapping.userId,
       );
       return balance;
     } catch (error) {
