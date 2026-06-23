@@ -24,7 +24,14 @@ class CallbackForwardService {
     }
 
     try {
-      const response = await axios.post(callbackUrl, callbackData, {
+      const forwardedData = {
+        ...callbackData,
+        providerSessionId: callbackData.providerSessionId || providerSessionId,
+        provider_session_id:
+          callbackData.provider_session_id || providerSessionId,
+      };
+
+      const response = await axios.post(callbackUrl, forwardedData, {
         timeout: 5000,
         headers: {
           "Content-Type": "application/json",
@@ -58,7 +65,12 @@ class CallbackForwardService {
         };
       }
 
-      if (typeof creditAmount !== "number" || isNaN(creditAmount)) {
+      const numericCreditAmount =
+        typeof creditAmount === "number"
+          ? creditAmount
+          : parseFloat(creditAmount);
+
+      if (isNaN(numericCreditAmount)) {
         console.error(
           `[ForwardService] Invalid credit_amount: ${creditAmount}`,
         );
@@ -72,7 +84,7 @@ class CallbackForwardService {
       return {
         success: true,
         response: {
-          credit_amount: creditAmount,
+          credit_amount: numericCreditAmount,
           timestamp: response.data?.timestamp || Date.now(),
         },
         duration,
@@ -162,11 +174,19 @@ class CallbackForwardService {
     }
   }
 
-  static async getBalanceByMember(memberAccount) {
+  static async getBalanceByMember(memberAccount, website = null) {
     try {
-      const mapping = await ProviderLaunchMap.findOne({
+      const query = {
         memberAccount: String(memberAccount),
-      }).sort({ launchedAt: -1 });
+      };
+
+      if (website) {
+        query.website = String(website);
+      }
+
+      const mapping = await ProviderLaunchMap.findOne(query).sort({
+        launchedAt: -1,
+      });
 
       if (!mapping) {
         console.log(`[BalanceByMember] No mapping for ${memberAccount}`);

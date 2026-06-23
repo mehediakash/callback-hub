@@ -10,6 +10,13 @@ class CallbackController {
 
     const { member_account, game_uid, game_round, bet_amount, win_amount } =
       callbackData;
+    const websiteHint = req.query.website ? String(req.query.website) : null;
+    const callbackSessionId =
+      callbackData.session_id ||
+      callbackData.sessionId ||
+      callbackData.providerSessionId ||
+      callbackData.provider_session_id ||
+      null;
 
     console.log(`[CallbackHub] ========== PROVIDER CALLBACK ==========`);
     console.log(`[CallbackHub] Received:`, {
@@ -18,6 +25,8 @@ class CallbackController {
       round: game_round,
       bet: bet_amount,
       win: win_amount,
+      website: websiteHint,
+      hasSessionId: !!callbackSessionId,
       timestamp: new Date().toISOString(),
     });
 
@@ -31,13 +40,56 @@ class CallbackController {
     }
 
     try {
-      // STEP 1: Find session - THIS IS THE CRITICAL PART
-      // Try to find ANY active session for this user+game
-      let mapping = await ProviderLaunchMap.findOne({
-        memberAccount: String(member_account),
-        gameUid: String(game_uid),
-        status: "active",
-      }).sort({ launchedAt: -1 }); // Get most recent
+      const balanceForMapping = async (selectedMapping) => {
+        let websiteBalance = null;
+
+        if (selectedMapping?.callbackUrl) {
+          websiteBalance = await CallbackForwardService.getBalanceFromWebsite(
+            selectedMapping.callbackUrl,
+            member_account,
+          );
+        }
+
+        if (websiteBalance !== null && websiteBalance >= 0) {
+          return websiteBalance;
+        }
+
+        if (
+          selectedMapping?.lastKnownBalance !== undefined &&
+          selectedMapping.lastKnownBalance >= 0
+        ) {
+          return selectedMapping.lastKnownBalance;
+        }
+
+        const fallbackBalance = await CallbackForwardService.getBalanceByMember(
+          member_account,
+          websiteHint,
+        );
+
+        return fallbackBalance !== null && fallbackBalance >= 0
+          ? fallbackBalance
+          : 0;
+      };
+
+      // STEP 1: Find session - prefer an exact provider session when present.
+      let mapping = null;
+
+      if (callbackSessionId) {
+        mapping = await ProviderLaunchMap.findOne({
+          providerSessionId: String(callbackSessionId),
+          ...(websiteHint ? { website: websiteHint } : {}),
+        }).sort({ launchedAt: -1 });
+      }
+
+      // Try to find the most recent active session for this user+game.
+      if (!mapping) {
+        mapping = await ProviderLaunchMap.findOne({
+          memberAccount: String(member_account),
+          gameUid: String(game_uid),
+          status: "active",
+          ...(websiteHint ? { website: websiteHint } : {}),
+        }).sort({ launchedAt: -1 }); // Get most recent
+      }
 
       // If no active session, try to find ANY session from last 10 minutes
       if (!mapping) {
@@ -49,6 +101,7 @@ class CallbackController {
           memberAccount: String(member_account),
           gameUid: String(game_uid),
           launchedAt: { $gt: new Date(Date.now() - 10 * 60 * 1000) },
+          ...(websiteHint ? { website: websiteHint } : {}),
         }).sort({ launchedAt: -1 });
 
         if (mapping) {
@@ -83,12 +136,7 @@ class CallbackController {
           })),
         );
 
-        const fallbackBalance =
-          await CallbackForwardService.getBalanceByMember(member_account);
-        const finalBalance =
-          fallbackBalance !== null && fallbackBalance >= 0
-            ? fallbackBalance
-            : 0;
+        const finalBalance = await balanceForMapping(null);
 
         console.log(
           `[CallbackHub] No session response: credit_amount=${finalBalance}`,
@@ -126,14 +174,7 @@ class CallbackController {
       });
 
       if (isDuplicate) {
-        const currentBalance =
-          await CallbackForwardService.getBalanceFromWebsite(
-            mapping.callbackUrl,
-            member_account,
-          );
-
-        const finalBalance =
-          currentBalance !== null && currentBalance >= 0 ? currentBalance : 0;
+        const finalBalance = await balanceForMapping(mapping);
 
         console.log(
           `[CallbackHub] Duplicate response: credit_amount=${finalBalance}`,
@@ -166,7 +207,8 @@ class CallbackController {
       if (
         forwardResult.success &&
         forwardResult.response &&
-        forwardResult.response.credit_amount !== undefined
+        forwardResult.response.credit_amount !== undefined &&
+        forwardResult.response.credit_amount >= 0
       ) {
         await ProcessedRound.markProcessed({
           gameRound: game_round,
@@ -181,6 +223,7 @@ class CallbackController {
         });
 
         mapping.lastProcessedRound = game_round;
+        mapping.lastKnownBalance = forwardResult.response.credit_amount;
         await mapping.save();
 
         const duration = Date.now() - startTime;
@@ -197,18 +240,11 @@ class CallbackController {
       // STEP 5: Forward failed - try emergency balance
       console.error(`[CallbackHub] Forward failed:`, {
         error: forwardResult.error,
+        creditAmount: forwardResult.response?.credit_amount,
         round: game_round,
       });
 
-      let emergencyBalance = await CallbackForwardService.getBalanceFromWebsite(
-        mapping.callbackUrl,
-        member_account,
-      );
-
-      const finalBalance =
-        emergencyBalance !== null && emergencyBalance >= 0
-          ? emergencyBalance
-          : 0;
+      const finalBalance = await balanceForMapping(mapping);
 
       console.log(`[CallbackHub] Emergency balance: ${finalBalance}`);
 
@@ -223,8 +259,10 @@ class CallbackController {
 
       let lastResortBalance = 0;
       try {
-        const fallback =
-          await CallbackForwardService.getBalanceByMember(member_account);
+        const fallback = await CallbackForwardService.getBalanceByMember(
+          member_account,
+          websiteHint,
+        );
         lastResortBalance = fallback !== null && fallback >= 0 ? fallback : 0;
       } catch (e) {
         console.error("[CallbackHub] Last resort failed:", e);
@@ -274,6 +312,14 @@ class CallbackController {
           goldbet: process.env.GOLDBET_CALLBACK_URL,
         };
         finalCallbackUrl = websiteCallbackUrls[website];
+      }
+
+      if (!finalCallbackUrl) {
+        console.error(`[CallbackHub] Missing callback URL for website`, {
+          website,
+          providerSessionId,
+        });
+        return res.status(400).json({ error: "Missing callback URL" });
       }
 
       // FIXED: Don't close previous sessions - just create new one

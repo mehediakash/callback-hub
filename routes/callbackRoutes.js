@@ -5,6 +5,7 @@ const CallbackController = require("../controllers/CallbackController");
 
 // Provider callback endpoint (main entry point)
 router.post("/provider/callback", CallbackController.handleProviderCallback);
+router.post("/api/games/callback", CallbackController.handleProviderCallback);
 
 // Website registration endpoints
 router.post("/internal/register", CallbackController.registerLaunch);
