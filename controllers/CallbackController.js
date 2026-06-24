@@ -2,6 +2,7 @@
 const ProviderLaunchMap = require("../models/ProviderLaunchMap");
 const ProcessedRound = require("../models/ProcessedRound");
 const CallbackForwardService = require("../services/CallbackForwardService");
+const mongoose = require("mongoose");
 
 class CallbackController {
   static async handleProviderCallback(req, res) {
@@ -10,13 +11,19 @@ class CallbackController {
 
     const { member_account, game_uid, game_round, bet_amount, win_amount } =
       callbackData;
-    const websiteHint = req.query.website ? String(req.query.website) : null;
     const callbackSessionId =
       callbackData.session_id ||
       callbackData.sessionId ||
       callbackData.providerSessionId ||
       callbackData.provider_session_id ||
       null;
+    const callbackUserIdCandidate =
+      callbackData.userId || callbackData.user_id || member_account || null;
+    const callbackUserId = mongoose.Types.ObjectId.isValid(
+      String(callbackUserIdCandidate),
+    )
+      ? String(callbackUserIdCandidate)
+      : null;
 
     console.log(`[CallbackHub] ========== PROVIDER CALLBACK ==========`);
     console.log(`[CallbackHub] Received:`, {
@@ -25,8 +32,13 @@ class CallbackController {
       round: game_round,
       bet: bet_amount,
       win: win_amount,
-      website: websiteHint,
+      website: "resolved from ProviderLaunchMap",
+      userId: callbackUserId,
+      memberAccount: member_account,
+      providerSessionId: callbackSessionId,
+      gameUid: game_uid,
       hasSessionId: !!callbackSessionId,
+      hasUserId: !!callbackUserId,
       timestamp: new Date().toISOString(),
     });
 
@@ -46,7 +58,8 @@ class CallbackController {
         if (selectedMapping?.callbackUrl) {
           websiteBalance = await CallbackForwardService.getBalanceFromWebsite(
             selectedMapping.callbackUrl,
-            member_account,
+            selectedMapping.memberAccount,
+            selectedMapping.userId,
           );
         }
 
@@ -63,7 +76,8 @@ class CallbackController {
 
         const fallbackBalance = await CallbackForwardService.getBalanceByMember(
           member_account,
-          websiteHint,
+          null,
+          callbackUserId,
         );
 
         return fallbackBalance !== null && fallbackBalance >= 0
@@ -71,48 +85,14 @@ class CallbackController {
           : 0;
       };
 
-      // STEP 1: Find session - prefer an exact provider session when present.
-      let mapping = null;
-
-      if (callbackSessionId) {
-        mapping = await ProviderLaunchMap.findOne({
-          providerSessionId: String(callbackSessionId),
-          ...(websiteHint ? { website: websiteHint } : {}),
-        }).sort({ launchedAt: -1 });
-      }
-
-      // Try to find the most recent active session for this user+game.
-      if (!mapping) {
-        mapping = await ProviderLaunchMap.findOne({
-          memberAccount: String(member_account),
-          gameUid: String(game_uid),
-          status: "active",
-          ...(websiteHint ? { website: websiteHint } : {}),
-        }).sort({ launchedAt: -1 }); // Get most recent
-      }
-
-      // If no active session, try to find ANY session from last 10 minutes
-      if (!mapping) {
-        console.log(
-          `[CallbackHub] No active session, looking for recent session...`,
-        );
-
-        mapping = await ProviderLaunchMap.findOne({
-          memberAccount: String(member_account),
-          gameUid: String(game_uid),
-          launchedAt: { $gt: new Date(Date.now() - 10 * 60 * 1000) },
-          ...(websiteHint ? { website: websiteHint } : {}),
-        }).sort({ launchedAt: -1 });
-
-        if (mapping) {
-          console.log(
-            `[CallbackHub] Found recent session with status=${mapping.status}, reactivating...`,
-          );
-          mapping.status = "active";
-          mapping.lastActivityAt = new Date();
-          await mapping.save();
-        }
-      }
+      // Website routing is derived only from the map selected by its provider
+      // session ID, then MongoDB user ID, then the scoped legacy fallback.
+      const mapping = await ProviderLaunchMap.findSessionForCallback({
+        member_account,
+        game_uid,
+        userId: callbackUserId,
+        providerSessionId: callbackSessionId,
+      });
 
       if (!mapping) {
         console.error(
@@ -130,6 +110,8 @@ class CallbackController {
           `[CallbackHub] Recent sessions for user:`,
           allSessions.map((s) => ({
             sessionId: s.providerSessionId,
+            website: s.website,
+            userId: s.userId,
             gameUid: s.gameUid,
             status: s.status,
             launchedAt: s.launchedAt,
@@ -152,6 +134,7 @@ class CallbackController {
       console.log(`[CallbackHub] Using session:`, {
         sessionId: mapping.providerSessionId,
         website: mapping.website,
+        userId: mapping.userId,
         member: mapping.memberAccount,
         game: mapping.gameUid,
         sessionNumber: mapping.sessionNumber,
@@ -165,6 +148,7 @@ class CallbackController {
       const isDuplicate = await ProcessedRound.isDuplicate(
         game_round,
         mapping.providerSessionId,
+        mapping.website,
       );
 
       console.log(`[CallbackHub] Duplicate check:`, {
@@ -193,6 +177,7 @@ class CallbackController {
         callbackData,
         mapping.website,
         mapping.providerSessionId,
+        mapping.userId,
       );
 
       console.log(`[CallbackHub] Forward result:`, {
@@ -213,7 +198,8 @@ class CallbackController {
         await ProcessedRound.markProcessed({
           gameRound: game_round,
           providerSessionId: mapping.providerSessionId,
-          memberAccount: member_account,
+          memberAccount: mapping.memberAccount,
+          userId: mapping.userId,
           gameUid: game_uid,
           mappingId: mapping._id,
           website: mapping.website,
@@ -261,7 +247,8 @@ class CallbackController {
       try {
         const fallback = await CallbackForwardService.getBalanceByMember(
           member_account,
-          websiteHint,
+          null,
+          callbackUserId,
         );
         lastResortBalance = fallback !== null && fallback >= 0 ? fallback : 0;
       } catch (e) {
@@ -294,14 +281,25 @@ class CallbackController {
 
       console.log(`[CallbackHub] Register launch:`, {
         memberAccount,
+        userId,
         website,
         gameUid,
         providerSessionId,
         gameName,
       });
 
-      if (!memberAccount || !website || !gameUid || !providerSessionId) {
+      if (
+        !memberAccount ||
+        !website ||
+        !gameUid ||
+        !providerSessionId ||
+        !userId
+      ) {
         return res.status(400).json({ error: "Missing required fields" });
+      }
+
+      if (!mongoose.Types.ObjectId.isValid(String(userId))) {
+        return res.status(400).json({ error: "Invalid userId" });
       }
 
       let finalCallbackUrl = callbackUrl;
@@ -326,6 +324,7 @@ class CallbackController {
       const sessionCount = await ProviderLaunchMap.countDocuments({
         memberAccount: String(memberAccount),
         gameUid: String(gameUid),
+        website,
       });
 
       const sessionNumber = sessionCount + 1;
@@ -336,7 +335,7 @@ class CallbackController {
         website,
         callbackUrl: finalCallbackUrl,
         providerSessionId: String(providerSessionId),
-        userId: userId || null,
+        userId: String(userId),
         gameName: gameName || null,
         sessionNumber,
         status: "active",
@@ -348,7 +347,7 @@ class CallbackController {
         `[CallbackHub] Session registered: #${mapping.sessionNumber} - ${providerSessionId}`,
       );
       console.log(
-        `[CallbackHub] User ${memberAccount} now has ${await ProviderLaunchMap.countDocuments({ memberAccount: String(memberAccount), status: "active" })} active sessions`,
+        `[CallbackHub] User ${memberAccount} on ${website} now has ${await ProviderLaunchMap.countDocuments({ memberAccount: String(memberAccount), website, status: "active" })} active sessions`,
       );
 
       res.json({

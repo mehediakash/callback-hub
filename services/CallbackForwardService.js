@@ -8,6 +8,7 @@ class CallbackForwardService {
     callbackData,
     website,
     providerSessionId,
+    userId,
   ) {
     const startTime = Date.now();
     const secret = process.env.INTERNAL_SECRET;
@@ -38,6 +39,7 @@ class CallbackForwardService {
           "X-Callback-Secret": secret,
           "X-Original-Website": website,
           "X-Provider-Session-Id": providerSessionId || "",
+          "X-User-Id": userId || "",
           "X-Request-Timestamp": Date.now().toString(),
         },
       });
@@ -123,7 +125,11 @@ class CallbackForwardService {
     }
   }
 
-  static async getBalanceFromWebsite(callbackUrl, memberAccount) {
+  static async getBalanceFromWebsite(
+    callbackUrl,
+    memberAccount,
+    userId = null,
+  ) {
     try {
       const secret = process.env.INTERNAL_SECRET;
       const baseUrl = callbackUrl.replace("/internal/provider-callback", "");
@@ -133,7 +139,10 @@ class CallbackForwardService {
       );
 
       const response = await axios.get(`${baseUrl}/internal/balance`, {
-        params: { memberAccount: String(memberAccount) },
+        params: {
+          memberAccount: String(memberAccount),
+          ...(userId ? { userId: String(userId) } : {}),
+        },
         timeout: 3000,
         headers: {
           "X-Callback-Secret": secret,
@@ -174,19 +183,33 @@ class CallbackForwardService {
     }
   }
 
-  static async getBalanceByMember(memberAccount, website = null) {
+  static async getBalanceByMember(
+    memberAccount,
+    website = null,
+    userId = null,
+  ) {
     try {
-      const query = {
-        memberAccount: String(memberAccount),
-      };
+      const query = userId
+        ? { userId: String(userId) }
+        : { memberAccount: String(memberAccount) };
 
       if (website) {
         query.website = String(website);
       }
 
-      const mapping = await ProviderLaunchMap.findOne(query).sort({
-        launchedAt: -1,
-      });
+      const mappings = await ProviderLaunchMap.find(query)
+        .sort({ launchedAt: -1 })
+        .limit(20);
+      const websites = new Set(mappings.map((mapping) => mapping.website));
+
+      if (!website && websites.size > 1) {
+        console.error(
+          `[BalanceByMember] Ambiguous balance lookup across websites for ${userId || memberAccount}`,
+        );
+        return null;
+      }
+
+      const mapping = mappings[0];
 
       if (!mapping) {
         console.log(`[BalanceByMember] No mapping for ${memberAccount}`);
@@ -195,7 +218,8 @@ class CallbackForwardService {
 
       const balance = await this.getBalanceFromWebsite(
         mapping.callbackUrl,
-        memberAccount,
+        mapping.memberAccount,
+        mapping.userId,
       );
       return balance;
     } catch (error) {
