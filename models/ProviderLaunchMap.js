@@ -1,6 +1,11 @@
 // callback-hub/models/ProviderLaunchMap.js
 const mongoose = require("mongoose");
 
+const DEBUG = process.env.DEBUG_CALLBACKS === "true";
+const debugLog = (...args) => {
+  if (DEBUG) console.log(...args);
+};
+
 const providerLaunchMapSchema = new mongoose.Schema(
   {
     memberAccount: { type: String, required: true, index: true },
@@ -41,6 +46,19 @@ providerLaunchMapSchema.index({
   gameUid: 1,
   status: 1,
 });
+providerLaunchMapSchema.index({
+  userId: 1,
+  gameUid: 1,
+  status: 1,
+  launchedAt: -1,
+});
+providerLaunchMapSchema.index({
+  memberAccount: 1,
+  gameUid: 1,
+  status: 1,
+  launchedAt: -1,
+});
+providerLaunchMapSchema.index({ memberAccount: 1, website: 1, status: 1 });
 providerLaunchMapSchema.index({ createdAt: 1 }, { expireAfterSeconds: 7200 });
 
 // Resolve callbacks without provider URL/query-string website hints.
@@ -49,7 +67,7 @@ providerLaunchMapSchema.statics.findSessionForCallback = async function (
 ) {
   const { member_account, game_uid, userId, providerSessionId } = callbackData;
 
-  console.log(
+  debugLog(
     `[ProviderLaunchMap] Looking for session: member=${member_account}, userId=${userId || null}, game=${game_uid}, providerSessionId=${providerSessionId || null}`,
   );
 
@@ -103,7 +121,7 @@ providerLaunchMapSchema.statics.findSessionForCallback = async function (
   }
 
   if (session) {
-    console.log(
+    debugLog(
       `[ProviderLaunchMap] Found active session #${session.sessionNumber}: ${session.providerSessionId}`,
     );
     return session;
@@ -130,7 +148,7 @@ providerLaunchMapSchema.statics.findSessionForCallback = async function (
   }
 
   if (recentSession) {
-    console.log(
+    debugLog(
       `[ProviderLaunchMap] Found recent session (status=${recentSession.status}): ${recentSession.providerSessionId}`,
     );
     // Reactivate it
@@ -140,7 +158,7 @@ providerLaunchMapSchema.statics.findSessionForCallback = async function (
     return recentSession;
   }
 
-  console.log(`[ProviderLaunchMap] No session found`);
+  debugLog(`[ProviderLaunchMap] No session found`);
   return null;
 };
 
@@ -181,7 +199,7 @@ providerLaunchMapSchema.statics.createSession = async function ({
     lastActivityAt: new Date(),
   });
 
-  console.log(
+  debugLog(
     `[ProviderLaunchMap] Created session #${sessionNumber}: ${providerSessionId} (keeping previous sessions active)`,
   );
 
@@ -193,7 +211,7 @@ providerLaunchMapSchema.statics.createSession = async function ({
     status: "active",
   });
 
-  console.log(
+  debugLog(
     `[ProviderLaunchMap] User ${memberAccount} now has ${activeCount} active sessions for game ${gameUid}`,
   );
 

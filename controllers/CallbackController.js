@@ -4,6 +4,11 @@ const ProcessedRound = require("../models/ProcessedRound");
 const CallbackForwardService = require("../services/CallbackForwardService");
 const mongoose = require("mongoose");
 
+const DEBUG = process.env.DEBUG_CALLBACKS === "true";
+const debugLog = (...args) => {
+  if (DEBUG) console.log(...args);
+};
+
 class CallbackController {
   static async handleProviderCallback(req, res) {
     const startTime = Date.now();
@@ -25,8 +30,7 @@ class CallbackController {
       ? String(callbackUserIdCandidate)
       : null;
 
-    console.log(`[CallbackHub] ========== PROVIDER CALLBACK ==========`);
-    console.log(`[CallbackHub] Received:`, {
+    debugLog(`[CallbackHub] Received:`, {
       member: member_account,
       game: game_uid,
       round: game_round,
@@ -104,7 +108,8 @@ class CallbackController {
           memberAccount: String(member_account),
         })
           .sort({ launchedAt: -1 })
-          .limit(10);
+          .limit(10)
+          .lean();
 
         console.error(
           `[CallbackHub] Recent sessions for user:`,
@@ -120,7 +125,7 @@ class CallbackController {
 
         const finalBalance = await balanceForMapping(null);
 
-        console.log(
+        debugLog(
           `[CallbackHub] No session response: credit_amount=${finalBalance}`,
         );
 
@@ -131,7 +136,7 @@ class CallbackController {
         });
       }
 
-      console.log(`[CallbackHub] Using session:`, {
+      debugLog(`[CallbackHub] Using session:`, {
         sessionId: mapping.providerSessionId,
         website: mapping.website,
         userId: mapping.userId,
@@ -151,7 +156,7 @@ class CallbackController {
         mapping.website,
       );
 
-      console.log(`[CallbackHub] Duplicate check:`, {
+      debugLog(`[CallbackHub] Duplicate check:`, {
         gameRound: game_round,
         providerSessionId: mapping.providerSessionId,
         isDuplicate,
@@ -160,7 +165,7 @@ class CallbackController {
       if (isDuplicate) {
         const finalBalance = await balanceForMapping(mapping);
 
-        console.log(
+        debugLog(
           `[CallbackHub] Duplicate response: credit_amount=${finalBalance}`,
         );
 
@@ -180,7 +185,7 @@ class CallbackController {
         mapping.userId,
       );
 
-      console.log(`[CallbackHub] Forward result:`, {
+      debugLog(`[CallbackHub] Forward result:`, {
         success: forwardResult.success,
         hasResponse: !!forwardResult.response,
         creditAmount: forwardResult.response?.credit_amount,
@@ -214,7 +219,7 @@ class CallbackController {
 
         const duration = Date.now() - startTime;
 
-        console.log(`[CallbackHub] SUCCESS - Returning to provider:`, {
+        debugLog(`[CallbackHub] SUCCESS - Returning to provider:`, {
           credit_amount: forwardResult.response.credit_amount,
           round: game_round,
           duration_ms: duration,
@@ -232,7 +237,7 @@ class CallbackController {
 
       const finalBalance = await balanceForMapping(mapping);
 
-      console.log(`[CallbackHub] Emergency balance: ${finalBalance}`);
+      debugLog(`[CallbackHub] Emergency balance: ${finalBalance}`);
 
       return res.status(200).json({
         credit_amount: finalBalance,
@@ -255,7 +260,7 @@ class CallbackController {
         console.error("[CallbackHub] Last resort failed:", e);
       }
 
-      console.log(
+      debugLog(
         `[CallbackHub] Fatal error response: credit_amount=${lastResortBalance}`,
       );
 
@@ -279,7 +284,7 @@ class CallbackController {
         callbackUrl,
       } = req.body;
 
-      console.log(`[CallbackHub] Register launch:`, {
+      debugLog(`[CallbackHub] Register launch:`, {
         memberAccount,
         userId,
         website,
@@ -343,11 +348,8 @@ class CallbackController {
         lastActivityAt: new Date(),
       });
 
-      console.log(
+      debugLog(
         `[CallbackHub] Session registered: #${mapping.sessionNumber} - ${providerSessionId}`,
-      );
-      console.log(
-        `[CallbackHub] User ${memberAccount} on ${website} now has ${await ProviderLaunchMap.countDocuments({ memberAccount: String(memberAccount), website, status: "active" })} active sessions`,
       );
 
       res.json({
@@ -377,7 +379,7 @@ class CallbackController {
         mapping.status = "completed";
         mapping.completedAt = new Date();
         await mapping.save();
-        console.log(`[CallbackHub] Session closed: ${providerSessionId}`);
+        debugLog(`[CallbackHub] Session closed: ${providerSessionId}`);
       }
 
       res.json({ success: true });

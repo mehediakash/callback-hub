@@ -24,7 +24,14 @@ app.use(errorHandler);
 
 // Connect to MongoDB
 mongoose
-  .connect(process.env.MONGODB_URI)
+  .connect(process.env.MONGODB_URI, {
+    // Defaults preserve the MongoDB driver's normal maximum unless configured.
+    maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE || 100),
+    minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE || 0),
+    maxIdleTimeMS: Number(process.env.MONGO_MAX_IDLE_TIME_MS || 60000),
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+  })
   .then(() => console.log("MongoDB connected"))
   .catch((err) => console.error("MongoDB connection error:", err));
 

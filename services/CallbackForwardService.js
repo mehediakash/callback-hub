@@ -1,6 +1,11 @@
 // callback-hub/services/CallbackForwardService.js
-const axios = require("axios");
+const axios = require("./httpClient");
 const ProviderLaunchMap = require("../models/ProviderLaunchMap");
+
+const DEBUG = process.env.DEBUG_CALLBACKS === "true";
+const debugLog = (...args) => {
+  if (DEBUG) console.log(...args);
+};
 
 class CallbackForwardService {
   static async forwardToWebsite(
@@ -13,7 +18,7 @@ class CallbackForwardService {
     const startTime = Date.now();
     const secret = process.env.INTERNAL_SECRET;
 
-    console.log(`[ForwardService] Forwarding to ${website}: ${callbackUrl}`);
+    debugLog(`[ForwardService] Forwarding to ${website}: ${callbackUrl}`);
 
     if (!callbackUrl || callbackUrl === "undefined") {
       console.error(`[ForwardService] Invalid callback URL for ${website}`);
@@ -46,7 +51,7 @@ class CallbackForwardService {
 
       const duration = Date.now() - startTime;
 
-      console.log(`[ForwardService] Response received in ${duration}ms:`, {
+      debugLog(`[ForwardService] Response received in ${duration}ms:`, {
         status: response.status,
         credit_amount: response.data?.credit_amount,
         hasTimestamp: !!response.data?.timestamp,
@@ -134,7 +139,7 @@ class CallbackForwardService {
       const secret = process.env.INTERNAL_SECRET;
       const baseUrl = callbackUrl.replace("/internal/provider-callback", "");
 
-      console.log(
+      debugLog(
         `[GetBalance] Requesting from ${baseUrl}/internal/balance for ${memberAccount}`,
       );
 
@@ -168,7 +173,7 @@ class CallbackForwardService {
         return null;
       }
 
-      console.log(
+      debugLog(
         `[GetBalance] Success: balance=${numericBalance} for ${memberAccount}`,
       );
       return numericBalance;
@@ -199,7 +204,8 @@ class CallbackForwardService {
 
       const mappings = await ProviderLaunchMap.find(query)
         .sort({ launchedAt: -1 })
-        .limit(20);
+        .limit(20)
+        .lean();
       const websites = new Set(mappings.map((mapping) => mapping.website));
 
       if (!website && websites.size > 1) {
@@ -212,7 +218,7 @@ class CallbackForwardService {
       const mapping = mappings[0];
 
       if (!mapping) {
-        console.log(`[BalanceByMember] No mapping for ${memberAccount}`);
+        debugLog(`[BalanceByMember] No mapping for ${memberAccount}`);
         return null;
       }
 

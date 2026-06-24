@@ -1,6 +1,11 @@
 // callback-hub/models/ProcessedRound.js
 const mongoose = require("mongoose");
 
+const DEBUG = process.env.DEBUG_CALLBACKS === "true";
+const debugLog = (...args) => {
+  if (DEBUG) console.log(...args);
+};
+
 const processedRoundSchema = new mongoose.Schema(
   {
     gameRound: { type: String, required: true },
@@ -49,7 +54,7 @@ processedRoundSchema.statics.isDuplicate = async function (
   website = null,
 ) {
   if (!gameRound || !providerSessionId) {
-    console.log(
+    debugLog(
       `[ProcessedRound] Missing params: round=${gameRound}, session=${providerSessionId}`,
     );
     return false;
@@ -67,7 +72,7 @@ processedRoundSchema.statics.isDuplicate = async function (
   const exists = await this.exists(query);
 
   if (exists) {
-    console.log(
+    debugLog(
       `[ProcessedRound] DUPLICATE: round=${gameRound}, session=${providerSessionId}`,
     );
   }
@@ -102,13 +107,13 @@ processedRoundSchema.statics.markProcessed = async function ({
       processedAt: new Date(),
     });
 
-    console.log(
+    debugLog(
       `[ProcessedRound] Marked processed: round=${gameRound}, session=${providerSessionId}`,
     );
     return true;
   } catch (error) {
     if (error.code === 11000) {
-      console.log(
+      debugLog(
         `[ProcessedRound] Already exists: round=${gameRound}, session=${providerSessionId}`,
       );
       return false;
