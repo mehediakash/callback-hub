@@ -6,7 +6,6 @@ const processedRoundSchema = new mongoose.Schema(
     gameRound: { type: String, required: true },
     providerSessionId: { type: String, required: true },
     memberAccount: { type: String, required: true, index: true },
-    userId: { type: String, index: true },
     gameUid: { type: String, required: true },
     mappingId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -33,20 +32,12 @@ processedRoundSchema.index(
 
 // Additional indexes
 processedRoundSchema.index({ memberAccount: 1, gameUid: 1, gameRound: 1 });
-processedRoundSchema.index({
-  website: 1,
-  memberAccount: 1,
-  gameUid: 1,
-  gameRound: 1,
-});
-processedRoundSchema.index({ website: 1, userId: 1, gameRound: 1 });
 processedRoundSchema.index({ mappingId: 1, processedAt: -1 });
 processedRoundSchema.index({ processedAt: 1 }, { expireAfterSeconds: 604800 });
 
 processedRoundSchema.statics.isDuplicate = async function (
   gameRound,
   providerSessionId,
-  website = null,
 ) {
   if (!gameRound || !providerSessionId) {
     console.log(
@@ -55,16 +46,10 @@ processedRoundSchema.statics.isDuplicate = async function (
     return false;
   }
 
-  const query = {
+  const exists = await this.exists({
     gameRound: String(gameRound),
     providerSessionId: String(providerSessionId),
-  };
-
-  if (website) {
-    query.website = String(website);
-  }
-
-  const exists = await this.exists(query);
+  });
 
   if (exists) {
     console.log(
@@ -79,7 +64,6 @@ processedRoundSchema.statics.markProcessed = async function ({
   gameRound,
   providerSessionId,
   memberAccount,
-  userId,
   gameUid,
   mappingId,
   website,
@@ -92,7 +76,6 @@ processedRoundSchema.statics.markProcessed = async function ({
       gameRound: String(gameRound),
       providerSessionId: String(providerSessionId),
       memberAccount: String(memberAccount),
-      userId: userId ? String(userId) : undefined,
       gameUid: String(gameUid),
       mappingId,
       website,
