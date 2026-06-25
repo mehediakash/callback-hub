@@ -93,7 +93,9 @@ processedRoundSchema.statics.markProcessed = async function ({
   winAmount,
 }) {
   try {
-    const result = await this.create({
+    const processedAt = new Date();
+    await this.collection.insertOne({
+      _id: new mongoose.Types.ObjectId(),
       gameRound: String(gameRound),
       providerSessionId: String(providerSessionId),
       memberAccount: String(memberAccount),
@@ -104,7 +106,11 @@ processedRoundSchema.statics.markProcessed = async function ({
       callbackData,
       betAmount: betAmount || 0,
       winAmount: winAmount || 0,
-      processedAt: new Date(),
+      retryCount: 0,
+      failed: false,
+      processedAt,
+      createdAt: processedAt,
+      updatedAt: processedAt,
     });
 
     debugLog(

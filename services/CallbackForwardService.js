@@ -30,12 +30,19 @@ class CallbackForwardService {
     }
 
     try {
-      const forwardedData = {
-        ...callbackData,
-        providerSessionId: callbackData.providerSessionId || providerSessionId,
-        provider_session_id:
-          callbackData.provider_session_id || providerSessionId,
-      };
+      let forwardedData = callbackData;
+      if (
+        !callbackData.providerSessionId ||
+        !callbackData.provider_session_id
+      ) {
+        forwardedData = {
+          ...callbackData,
+          providerSessionId:
+            callbackData.providerSessionId || providerSessionId,
+          provider_session_id:
+            callbackData.provider_session_id || providerSessionId,
+        };
+      }
 
       const response = await axios.post(callbackUrl, forwardedData, {
         timeout: 5000,
@@ -203,6 +210,7 @@ class CallbackForwardService {
       }
 
       const mappings = await ProviderLaunchMap.find(query)
+        .select("website callbackUrl memberAccount userId launchedAt")
         .sort({ launchedAt: -1 })
         .limit(20)
         .lean();

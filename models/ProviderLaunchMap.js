@@ -5,6 +5,8 @@ const DEBUG = process.env.DEBUG_CALLBACKS === "true";
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
+const CALLBACK_MAPPING_PROJECTION =
+  "_id memberAccount gameUid website callbackUrl providerSessionId userId gameName launchedAt lastActivityAt status lastProcessedRound sessionNumber lastKnownBalance completedAt";
 
 const providerLaunchMapSchema = new mongoose.Schema(
   {
@@ -74,7 +76,9 @@ providerLaunchMapSchema.statics.findSessionForCallback = async function (
   if (providerSessionId) {
     const session = await this.findOne({
       providerSessionId: String(providerSessionId),
-    });
+    })
+      .select(CALLBACK_MAPPING_PROJECTION)
+      .lean();
     if (session) return session;
   }
 
@@ -84,8 +88,10 @@ providerLaunchMapSchema.statics.findSessionForCallback = async function (
       gameUid: String(game_uid),
       status: "active",
     })
+      .select(CALLBACK_MAPPING_PROJECTION)
       .sort({ launchedAt: -1 })
-      .limit(20);
+      .limit(20)
+      .lean();
     const userWebsites = new Set(
       userSessions.map((session) => session.website),
     );
@@ -101,17 +107,18 @@ providerLaunchMapSchema.statics.findSessionForCallback = async function (
   }
 
   // Strategy 1: Find the MOST RECENT active session (not oldest)
-  const session = await this.findOne({
+  const activeMemberQuery = {
     memberAccount: String(member_account),
     gameUid: String(game_uid),
     status: "active",
-  }).sort({ launchedAt: -1 }); // ← Get newest session first
-
-  const memberWebsites = await this.distinct("website", {
-    memberAccount: String(member_account),
-    gameUid: String(game_uid),
-    status: "active",
-  });
+  };
+  const [session, memberWebsites] = await Promise.all([
+    this.findOne(activeMemberQuery)
+      .select(CALLBACK_MAPPING_PROJECTION)
+      .sort({ launchedAt: -1 })
+      .lean(),
+    this.distinct("website", activeMemberQuery),
+  ]);
 
   if (memberWebsites.length > 1) {
     console.error(
@@ -128,17 +135,19 @@ providerLaunchMapSchema.statics.findSessionForCallback = async function (
   }
 
   // Strategy 2: If no active session, find any session from last 5 minutes
-  const recentSession = await this.findOne({
+  const recentCutoff = new Date(Date.now() - 5 * 60 * 1000);
+  const recentMemberQuery = {
     memberAccount: String(member_account),
     gameUid: String(game_uid),
-    launchedAt: { $gt: new Date(Date.now() - 5 * 60 * 1000) }, // Last 5 minutes
-  }).sort({ launchedAt: -1 });
-
-  const recentWebsites = await this.distinct("website", {
-    memberAccount: String(member_account),
-    gameUid: String(game_uid),
-    launchedAt: { $gt: new Date(Date.now() - 5 * 60 * 1000) },
-  });
+    launchedAt: { $gt: recentCutoff },
+  };
+  const [recentSession, recentWebsites] = await Promise.all([
+    this.findOne(recentMemberQuery)
+      .select(CALLBACK_MAPPING_PROJECTION)
+      .sort({ launchedAt: -1 })
+      .lean(),
+    this.distinct("website", recentMemberQuery),
+  ]);
 
   if (recentWebsites.length > 1) {
     console.error(
@@ -152,10 +161,12 @@ providerLaunchMapSchema.statics.findSessionForCallback = async function (
       `[ProviderLaunchMap] Found recent session (status=${recentSession.status}): ${recentSession.providerSessionId}`,
     );
     // Reactivate it
-    recentSession.status = "active";
-    recentSession.lastActivityAt = new Date();
-    await recentSession.save();
-    return recentSession;
+    const lastActivityAt = new Date();
+    await this.updateOne(
+      { _id: recentSession._id },
+      { $set: { status: "active", lastActivityAt } },
+    );
+    return { ...recentSession, status: "active", lastActivityAt };
   }
 
   debugLog(`[ProviderLaunchMap] No session found`);
@@ -204,16 +215,18 @@ providerLaunchMapSchema.statics.createSession = async function ({
   );
 
   // Log all active sessions for this user
-  const activeCount = await this.countDocuments({
-    memberAccount: String(memberAccount),
-    gameUid: String(gameUid),
-    website,
-    status: "active",
-  });
+  if (DEBUG) {
+    const activeCount = await this.countDocuments({
+      memberAccount: String(memberAccount),
+      gameUid: String(gameUid),
+      website,
+      status: "active",
+    });
 
-  debugLog(
-    `[ProviderLaunchMap] User ${memberAccount} now has ${activeCount} active sessions for game ${gameUid}`,
-  );
+    debugLog(
+      `[ProviderLaunchMap] User ${memberAccount} now has ${activeCount} active sessions for game ${gameUid}`,
+    );
+  }
 
   return session;
 };

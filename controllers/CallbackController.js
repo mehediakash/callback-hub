@@ -9,6 +9,10 @@ const DEBUG = process.env.DEBUG_CALLBACKS === "true";
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
+const toObjectId = (value) =>
+  value instanceof mongoose.Types.ObjectId
+    ? value
+    : new mongoose.Types.ObjectId(String(value));
 
 class CallbackController {
   static async handleProviderCallback(req, res) {
@@ -133,24 +137,29 @@ class CallbackController {
         );
 
         // Log all sessions for debugging
-        const allSessions = await ProviderLaunchMap.find({
-          memberAccount: String(member_account),
-        })
-          .sort({ launchedAt: -1 })
-          .limit(10)
-          .lean();
+        if (DEBUG) {
+          const allSessions = await ProviderLaunchMap.find({
+            memberAccount: String(member_account),
+          })
+            .select(
+              "providerSessionId website userId gameUid status launchedAt",
+            )
+            .sort({ launchedAt: -1 })
+            .limit(10)
+            .lean();
 
-        console.error(
-          `[CallbackHub] Recent sessions for user:`,
-          allSessions.map((s) => ({
-            sessionId: s.providerSessionId,
-            website: s.website,
-            userId: s.userId,
-            gameUid: s.gameUid,
-            status: s.status,
-            launchedAt: s.launchedAt,
-          })),
-        );
+          console.error(
+            `[CallbackHub] Recent sessions for user:`,
+            allSessions.map((s) => ({
+              sessionId: s.providerSessionId,
+              website: s.website,
+              userId: s.userId,
+              gameUid: s.gameUid,
+              status: s.status,
+              launchedAt: s.launchedAt,
+            })),
+          );
+        }
 
         const finalBalance = await balanceForMapping(null);
 
@@ -176,12 +185,14 @@ class CallbackController {
         launchedAt: mapping.launchedAt,
       });
 
-      ProviderLaunchMap.updateOne(
-        { _id: mapping._id },
-        { $set: { lastActivityAt: new Date() } },
-      ).catch((error) =>
-        console.error("[CallbackHub] Activity update failed:", error.message),
-      );
+      ProviderLaunchMap.collection
+        .updateOne(
+          { _id: toObjectId(mapping._id) },
+          { $set: { lastActivityAt: new Date() } },
+        )
+        .catch((error) =>
+          console.error("[CallbackHub] Activity update failed:", error.message),
+        );
 
       // STEP 2: Duplicate check
       const redisDuplicateStartedAt = Date.now();
@@ -276,13 +287,14 @@ class CallbackController {
           winAmount: win_amount || 0,
         });
 
-        await ProviderLaunchMap.updateOne(
-          { _id: mapping._id },
+        const activityDate = new Date();
+        await ProviderLaunchMap.collection.updateOne(
+          { _id: toObjectId(mapping._id) },
           {
             $set: {
               lastProcessedRound: game_round,
               lastKnownBalance: forwardResult.response.credit_amount,
-              lastActivityAt: new Date(),
+              lastActivityAt: activityDate,
             },
           },
         );
@@ -469,14 +481,25 @@ class CallbackController {
         return res.status(400).json({ error: "providerSessionId required" });
       }
 
-      const mapping = await ProviderLaunchMap.findOne({
-        providerSessionId: String(providerSessionId),
-      });
+      const mapping = await ProviderLaunchMap.findOneAndUpdate(
+        {
+          providerSessionId: String(providerSessionId),
+          status: "active",
+        },
+        {
+          $set: {
+            status: "completed",
+            completedAt: new Date(),
+          },
+        },
+        {
+          new: true,
+        },
+      )
+        .select("providerSessionId")
+        .lean();
 
-      if (mapping && mapping.status === "active") {
-        mapping.status = "completed";
-        mapping.completedAt = new Date();
-        await mapping.save();
+      if (mapping) {
         CallbackCacheService.removeMapping(mapping).catch((error) =>
           console.warn(
             "[CallbackHub] Redis mapping removal failed:",
