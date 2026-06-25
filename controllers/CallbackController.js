@@ -2,6 +2,7 @@
 const ProviderLaunchMap = require("../models/ProviderLaunchMap");
 const ProcessedRound = require("../models/ProcessedRound");
 const CallbackForwardService = require("../services/CallbackForwardService");
+const CallbackCacheService = require("../services/CallbackCacheService");
 const mongoose = require("mongoose");
 
 const DEBUG = process.env.DEBUG_CALLBACKS === "true";
@@ -91,11 +92,39 @@ class CallbackController {
 
       // Website routing is derived only from the map selected by its provider
       // session ID, then MongoDB user ID, then the scoped legacy fallback.
-      const mapping = await ProviderLaunchMap.findSessionForCallback({
-        member_account,
-        game_uid,
-        userId: callbackUserId,
-        providerSessionId: callbackSessionId,
+      const redisSessionStartedAt = Date.now();
+      let mapping = callbackSessionId
+        ? await CallbackCacheService.getMappingByProvider(callbackSessionId)
+        : null;
+      const redisSessionHit = !!mapping;
+      const redisSessionMs = Date.now() - redisSessionStartedAt;
+
+      if (!mapping) {
+        const mongoSessionStartedAt = Date.now();
+        mapping = await ProviderLaunchMap.findSessionForCallback({
+          member_account,
+          game_uid,
+          userId: callbackUserId,
+          providerSessionId: callbackSessionId,
+        });
+        const mongoSessionMs = Date.now() - mongoSessionStartedAt;
+        debugLog("[CallbackHub] Mongo session lookup timing:", {
+          mongoSessionMs,
+        });
+
+        if (mapping) {
+          CallbackCacheService.cacheMapping(mapping).catch((error) =>
+            console.warn(
+              "[CallbackHub] Redis mapping cache failed:",
+              error.message,
+            ),
+          );
+        }
+      }
+
+      debugLog("[CallbackHub] Redis session lookup timing:", {
+        redisSessionMs,
+        hit: redisSessionHit,
       });
 
       if (!mapping) {
@@ -147,19 +176,53 @@ class CallbackController {
         launchedAt: mapping.launchedAt,
       });
 
-      await mapping.updateActivity();
+      ProviderLaunchMap.updateOne(
+        { _id: mapping._id },
+        { $set: { lastActivityAt: new Date() } },
+      ).catch((error) =>
+        console.error("[CallbackHub] Activity update failed:", error.message),
+      );
 
       // STEP 2: Duplicate check
-      const isDuplicate = await ProcessedRound.isDuplicate(
-        game_round,
-        mapping.providerSessionId,
+      const redisDuplicateStartedAt = Date.now();
+      let isDuplicate = await CallbackCacheService.isDuplicateRound(
         mapping.website,
+        mapping.providerSessionId,
+        game_round,
       );
+      const redisDuplicateMs = Date.now() - redisDuplicateStartedAt;
+
+      if (!isDuplicate) {
+        const mongoDuplicateStartedAt = Date.now();
+        isDuplicate = await ProcessedRound.isDuplicate(
+          game_round,
+          mapping.providerSessionId,
+          mapping.website,
+        );
+        const mongoDuplicateMs = Date.now() - mongoDuplicateStartedAt;
+        debugLog("[CallbackHub] Mongo duplicate timing:", {
+          mongoDuplicateMs,
+        });
+
+        if (isDuplicate) {
+          CallbackCacheService.markProcessedRound({
+            website: mapping.website,
+            providerSessionId: mapping.providerSessionId,
+            gameRound: game_round,
+          }).catch((error) =>
+            console.warn(
+              "[CallbackHub] Redis duplicate cache failed:",
+              error.message,
+            ),
+          );
+        }
+      }
 
       debugLog(`[CallbackHub] Duplicate check:`, {
         gameRound: game_round,
         providerSessionId: mapping.providerSessionId,
         isDuplicate,
+        redisDuplicateMs,
       });
 
       if (isDuplicate) {
@@ -213,9 +276,37 @@ class CallbackController {
           winAmount: win_amount || 0,
         });
 
-        mapping.lastProcessedRound = game_round;
-        mapping.lastKnownBalance = forwardResult.response.credit_amount;
-        await mapping.save();
+        await ProviderLaunchMap.updateOne(
+          { _id: mapping._id },
+          {
+            $set: {
+              lastProcessedRound: game_round,
+              lastKnownBalance: forwardResult.response.credit_amount,
+              lastActivityAt: new Date(),
+            },
+          },
+        );
+
+        CallbackCacheService.markProcessedRound({
+          website: mapping.website,
+          providerSessionId: mapping.providerSessionId,
+          gameRound: game_round,
+          creditAmount: forwardResult.response.credit_amount,
+        }).catch((error) =>
+          console.warn(
+            "[CallbackHub] Redis processed round cache failed:",
+            error.message,
+          ),
+        );
+        CallbackCacheService.updateMapping(mapping, {
+          lastProcessedRound: game_round,
+          lastKnownBalance: forwardResult.response.credit_amount,
+        }).catch((error) =>
+          console.warn(
+            "[CallbackHub] Redis mapping update failed:",
+            error.message,
+          ),
+        );
 
         const duration = Date.now() - startTime;
 
@@ -352,6 +443,13 @@ class CallbackController {
         `[CallbackHub] Session registered: #${mapping.sessionNumber} - ${providerSessionId}`,
       );
 
+      CallbackCacheService.cacheMapping(mapping).catch((error) =>
+        console.warn(
+          "[CallbackHub] Redis launch mapping cache failed:",
+          error.message,
+        ),
+      );
+
       res.json({
         success: true,
         mappingId: mapping._id,
@@ -379,6 +477,12 @@ class CallbackController {
         mapping.status = "completed";
         mapping.completedAt = new Date();
         await mapping.save();
+        CallbackCacheService.removeMapping(mapping).catch((error) =>
+          console.warn(
+            "[CallbackHub] Redis mapping removal failed:",
+            error.message,
+          ),
+        );
         debugLog(`[CallbackHub] Session closed: ${providerSessionId}`);
       }
 
